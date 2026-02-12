@@ -14,7 +14,7 @@ jobs:
 
     steps:
       # ============================================================
-      # 步骤 1: 获取 Cloudflare 全部 IPv4 段，生成 ip_hk.txt
+      # 步骤 1: 获取 Cloudflare 全部 IPv4 段
       # ============================================================
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -24,7 +24,6 @@ jobs:
           echo "📥 正在从 Cloudflare API 获取 IPv4 地址段..."
           response=$(curl -s https://api.cloudflare.com/client/v4/ips)
 
-          # 检查 API 是否返回成功
           success=$(echo "$response" | jq -r '.success')
           if [ "$success" != "true" ]; then
             echo "❌ Cloudflare API 请求失败"
@@ -32,16 +31,43 @@ jobs:
             exit 1
           fi
 
-          # 提取所有 IPv4 CIDR 段
-          echo "$response" | jq -r '.result.ipv4_cidrs[]' > ip_hk.txt
-
+          echo "$response" | jq -r '.result.ipv4_cidrs[]' > ip_all.txt
           echo "✅ 已获取 Cloudflare IPv4 段："
-          cat ip_hk.txt
-          echo ""
-          echo "📊 共 $(wc -l < ip_hk.txt) 个 CIDR 段"
+          cat ip_all.txt
+          echo "📊 共 $(wc -l < ip_all.txt) 个 CIDR 段"
 
       # ============================================================
-      # 步骤 2: 通过 cloudflared 建立 SSH 隧道并连接远程主机
+      # 步骤 2: 在 GitHub Actions 内筛选香港(HKG)数据中心 IP
+      # ============================================================
+      - name: Download CloudflareSpeedTest
+        run: |
+          echo "📦 正在下载 CloudflareSpeedTest..."
+          wget -qO cfst.tar.gz https://github.com/XIU2/CloudflareSpeedTest/releases/download/v2.3.4/CloudflareST_linux_amd64.tar.gz
+          tar -xzf cfst.tar.gz
+          chmod +x CloudflareST
+          echo "✅ CloudflareSpeedTest 已准备就绪"
+
+      - name: Filter HKG datacenter IPs
+        run: |
+          echo "🔍 正在筛选经过香港(HKG)数据中心的 IP..."
+          # 使用 HTTPing 模式 + cfcolo HKG 筛选 + 禁用下载测试
+          ./CloudflareST -f ip_all.txt -httping -cfcolo HKG -dd -o hkg_result.csv
+
+          echo "📋 HKG 筛选结果："
+          cat hkg_result.csv
+
+          # 提取通过 HKG 筛选的 IP 列表（跳过标题行，取第一列 IP）
+          if [ -f hkg_result.csv ] && [ $(wc -l < hkg_result.csv) -gt 1 ]; then
+            tail -n +2 hkg_result.csv | cut -d',' -f1 > ip_hk.txt
+            echo "✅ 筛选出 $(wc -l < ip_hk.txt) 个香港数据中心 IP"
+            cat ip_hk.txt
+          else
+            echo "❌ 未找到经过 HKG 数据中心的 IP"
+            exit 1
+          fi
+
+      # ============================================================
+      # 步骤 3: 通过 cloudflared 建立 SSH 隧道
       # ============================================================
       - name: Setup cloudflared
         run: |
@@ -51,13 +77,11 @@ jobs:
       - name: Start cloudflared SSH tunnel
         run: |
           echo "🔐 正在建立 Cloudflare Tunnel SSH 连接..."
-          # 在后台启动 cloudflared 隧道
           nohup bin/cloudflared access ssh \
             --hostname ${{ secrets.SSH_HOST }} \
             --url ssh://127.0.0.1:2202 \
             > /tmp/cloudflared.log 2>&1 &
 
-          # 等待隧道建立
           echo "⏳ 等待隧道建立..."
           for i in $(seq 1 30); do
             if nc -z 127.0.0.1 2202 2>/dev/null; then
@@ -73,31 +97,31 @@ jobs:
           done
 
       # ============================================================
-      # 步骤 3: 上传 ip_hk.txt 到远程主机
+      # 步骤 4: 上传筛选后的 ip_hk.txt 到远程主机
       # ============================================================
       - name: Install sshpass
         run: sudo apt-get install -y sshpass
 
       - name: Upload ip_hk.txt to remote server
         run: |
-          echo "📤 正在上传 ip_hk.txt 到远程主机..."
+          echo "📤 正在上传筛选后的 ip_hk.txt 到远程主机..."
           sshpass -p '${{ secrets.SSH_PASSWORD }}' \
             scp -P 2202 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
             ip_hk.txt \
             ${{ secrets.SSH_USERNAME }}@127.0.0.1:/root/cfst/ip_hk.txt
-          echo "✅ ip_hk.txt 已上传到 /root/cfst/ip_hk.txt"
+          echo "✅ ip_hk.txt (仅含 HKG IP) 已上传到 /root/cfst/ip_hk.txt"
 
       # ============================================================
-      # 步骤 4 & 5: SSH 执行测速
+      # 步骤 5: 家庭主机仅执行下载测速（IP 已经过 HKG 筛选）
       # ============================================================
-      - name: Run CloudflareSpeedTest on remote server
+      - name: Run speed test on remote server
         id: speedtest
         run: |
-          echo "🚀 正在远程主机上运行 CloudflareSpeedTest..."
+          echo "🚀 正在远程主机上执行下载测速（仅已筛选的 HKG IP）..."
           sshpass -p '${{ secrets.SSH_PASSWORD }}' \
             ssh -p 2202 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
             ${{ secrets.SSH_USERNAME }}@127.0.0.1 \
-            "cd /root/cfst && ./cfst -f ip_hk.txt -cfcolo HKG -url ${{ secrets.SPEEDTEST_URL }}" \
+            "cd /root/cfst && ./cfst -f ip_hk.txt -url ${{ secrets.SPEEDTEST_URL }}" \
             | tee /tmp/cfst_output.txt
 
           echo "✅ 测速完成"
@@ -109,7 +133,6 @@ jobs:
         run: |
           echo "📊 正在提取下载速度最快的 IP..."
 
-          # 从远程主机获取测速结果文件
           sshpass -p '${{ secrets.SSH_PASSWORD }}' \
             scp -P 2202 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
             ${{ secrets.SSH_USERNAME }}@127.0.0.1:/root/cfst/result.csv \
@@ -119,7 +142,6 @@ jobs:
           cat /tmp/result.csv
 
           # 解析 CSV: 跳过标题行，按下载速度（最后一列）排序取最快
-          # result.csv 格式: IP地址,已发送,已接收,丢包率,平均延迟,下载速度(MB/s)
           fastest_ip=$(tail -n +2 /tmp/result.csv | sort -t',' -k6 -rn | head -1 | cut -d',' -f1)
 
           if [ -z "$fastest_ip" ]; then
@@ -138,13 +160,10 @@ jobs:
         run: |
           echo "🚀 正在推送 cf-host-ip.txt 到 suwei8/blog..."
 
-          # 克隆博客仓库
           git clone https://x-access-token:${{ secrets.BLOG_DEPLOY_TOKEN }}@github.com/suwei8/blog.git /tmp/blog
 
-          # 复制结果文件
           cp cf-host-ip.txt /tmp/blog/cf-host-ip.txt
 
-          # 配置 git 并推送
           cd /tmp/blog
           git config user.name "CFST-Bot"
           git config user.email "cfst-bot@github.com"
@@ -162,6 +181,5 @@ jobs:
         if: always()
         run: |
           echo "🧹 清理中..."
-          # 终止 cloudflared 进程
           pkill cloudflared || true
           echo "✅ 清理完成"
