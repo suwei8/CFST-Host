@@ -39,19 +39,12 @@ jobs:
       # ============================================================
       # 步骤 2: 在 GitHub Actions 内筛选香港(HKG)数据中心 IP
       # ============================================================
-      - name: Download CloudflareSpeedTest
-        run: |
-          echo "📦 正在下载 CloudflareSpeedTest..."
-          wget -qO cfst.tar.gz https://github.com/XIU2/CloudflareSpeedTest/releases/download/v2.3.4/CloudflareST_linux_amd64.tar.gz
-          tar -xzf cfst.tar.gz
-          chmod +x CloudflareST
-          echo "✅ CloudflareSpeedTest 已准备就绪"
-
       - name: Filter HKG datacenter IPs
         run: |
-          echo "🔍 正在筛选经过香港(HKG)数据中心的 IP..."
+          echo "🔍 正在使用 bin/cfst 筛选经过香港(HKG)数据中心的 IP..."
+          chmod +x bin/cfst
           # 使用 HTTPing 模式 + cfcolo HKG 筛选 + 禁用下载测试
-          ./CloudflareST -f ip_all.txt -httping -cfcolo HKG -dd -o hkg_result.csv
+          bin/cfst -f ip_all.txt -httping -cfcolo HKG -dd -o hkg_result.csv
 
           echo "📋 HKG 筛选结果："
           cat hkg_result.csv
