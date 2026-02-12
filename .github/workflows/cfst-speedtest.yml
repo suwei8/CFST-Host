@@ -89,7 +89,7 @@ jobs:
             ssh -p 2202 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
             -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
             ${{ secrets.SSH_USERNAME }}@127.0.0.1 \
-            "cd /root/cfst && ./cfst -f ip_hk.txt -cfcolo HKG -url ${{ secrets.SPEEDTEST_URL }}" \
+            "cd /root/cfst && ./cfst -f ip_hk.txt -httping -cfcolo HKG -url ${{ secrets.SPEEDTEST_URL }}" \
             | tee /tmp/cfst_output.txt
 
           echo "✅ 测速完成"
@@ -126,9 +126,9 @@ jobs:
       # ============================================================
       - name: Push cf-host-ip.txt to blog repo
         run: |
-          echo "🚀 正在推送 cf-host-ip.txt 到 suwei8/blog..."
+          echo "🚀 正在推送结果..."
 
-          git clone https://x-access-token:${{ secrets.BLOG_DEPLOY_TOKEN }}@github.com/suwei8/blog.git /tmp/blog
+          git clone https://x-access-token:${{ secrets.BLOG_DEPLOY_TOKEN }}@github.com/${{ secrets.BLOG_REPO }}.git /tmp/blog
           cp cf-host-ip.txt /tmp/blog/cf-host-ip.txt
 
           cd /tmp/blog
@@ -138,7 +138,7 @@ jobs:
           git diff --cached --quiet && echo "ℹ️ IP 未变化，无需推送" || {
             git commit -m "🔄 更新最快 Cloudflare IP: ${{ env.FASTEST_IP }} ($(date -u +%Y-%m-%d))"
             git push
-            echo "✅ 已推送到 suwei8/blog"
+            echo "✅ 已推送完成"
           }
 
       # ============================================================
