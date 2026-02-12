@@ -1,0 +1,167 @@
+name: Cloudflare Speed Test
+
+on:
+  schedule:
+    # 每天 UTC 02:00（北京时间 10:00）运行
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    # 支持手动触发
+
+jobs:
+  speedtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      # ============================================================
+      # 步骤 1: 获取 Cloudflare 全部 IPv4 段，生成 ip_hk.txt
+      # ============================================================
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Fetch Cloudflare IPv4 ranges
+        run: |
+          echo "📥 正在从 Cloudflare API 获取 IPv4 地址段..."
+          response=$(curl -s https://api.cloudflare.com/client/v4/ips)
+
+          # 检查 API 是否返回成功
+          success=$(echo "$response" | jq -r '.success')
+          if [ "$success" != "true" ]; then
+            echo "❌ Cloudflare API 请求失败"
+            echo "$response" | jq .
+            exit 1
+          fi
+
+          # 提取所有 IPv4 CIDR 段
+          echo "$response" | jq -r '.result.ipv4_cidrs[]' > ip_hk.txt
+
+          echo "✅ 已获取 Cloudflare IPv4 段："
+          cat ip_hk.txt
+          echo ""
+          echo "📊 共 $(wc -l < ip_hk.txt) 个 CIDR 段"
+
+      # ============================================================
+      # 步骤 2: 通过 cloudflared 建立 SSH 隧道并连接远程主机
+      # ============================================================
+      - name: Setup cloudflared
+        run: |
+          echo "📦 正在设置 cloudflared..."
+          chmod +x bin/cloudflared
+
+      - name: Start cloudflared SSH tunnel
+        run: |
+          echo "🔐 正在建立 Cloudflare Tunnel SSH 连接..."
+          # 在后台启动 cloudflared 隧道
+          nohup bin/cloudflared access ssh \
+            --hostname ${{ secrets.SSH_HOST }} \
+            --url ssh://127.0.0.1:2202 \
+            > /tmp/cloudflared.log 2>&1 &
+
+          # 等待隧道建立
+          echo "⏳ 等待隧道建立..."
+          for i in $(seq 1 30); do
+            if nc -z 127.0.0.1 2202 2>/dev/null; then
+              echo "✅ SSH 隧道已在 127.0.0.1:2202 建立"
+              break
+            fi
+            if [ $i -eq 30 ]; then
+              echo "❌ SSH 隧道建立超时"
+              cat /tmp/cloudflared.log
+              exit 1
+            fi
+            sleep 2
+          done
+
+      # ============================================================
+      # 步骤 3: 上传 ip_hk.txt 到远程主机
+      # ============================================================
+      - name: Install sshpass
+        run: sudo apt-get install -y sshpass
+
+      - name: Upload ip_hk.txt to remote server
+        run: |
+          echo "📤 正在上传 ip_hk.txt 到远程主机..."
+          sshpass -p '${{ secrets.SSH_PASSWORD }}' \
+            scp -P 2202 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            ip_hk.txt \
+            ${{ secrets.SSH_USERNAME }}@127.0.0.1:/root/cfst/ip_hk.txt
+          echo "✅ ip_hk.txt 已上传到 /root/cfst/ip_hk.txt"
+
+      # ============================================================
+      # 步骤 4 & 5: SSH 执行测速
+      # ============================================================
+      - name: Run CloudflareSpeedTest on remote server
+        id: speedtest
+        run: |
+          echo "🚀 正在远程主机上运行 CloudflareSpeedTest..."
+          sshpass -p '${{ secrets.SSH_PASSWORD }}' \
+            ssh -p 2202 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            ${{ secrets.SSH_USERNAME }}@127.0.0.1 \
+            "cd /root/cfst && ./cfst -f ip_hk.txt -cfcolo HKG -url ${{ secrets.SPEEDTEST_URL }}" \
+            | tee /tmp/cfst_output.txt
+
+          echo "✅ 测速完成"
+
+      # ============================================================
+      # 步骤 6: 提取最快 IP 保存到 cf-host-ip.txt
+      # ============================================================
+      - name: Extract fastest IP
+        run: |
+          echo "📊 正在提取下载速度最快的 IP..."
+
+          # 从远程主机获取测速结果文件
+          sshpass -p '${{ secrets.SSH_PASSWORD }}' \
+            scp -P 2202 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            ${{ secrets.SSH_USERNAME }}@127.0.0.1:/root/cfst/result.csv \
+            /tmp/result.csv
+
+          echo "📋 测速结果："
+          cat /tmp/result.csv
+
+          # 解析 CSV: 跳过标题行，按下载速度（最后一列）排序取最快
+          # result.csv 格式: IP地址,已发送,已接收,丢包率,平均延迟,下载速度(MB/s)
+          fastest_ip=$(tail -n +2 /tmp/result.csv | sort -t',' -k6 -rn | head -1 | cut -d',' -f1)
+
+          if [ -z "$fastest_ip" ]; then
+            echo "❌ 未能提取到有效 IP"
+            exit 1
+          fi
+
+          echo "$fastest_ip" > cf-host-ip.txt
+          echo "✅ 最快 IP: $fastest_ip"
+          echo "FASTEST_IP=$fastest_ip" >> $GITHUB_ENV
+
+      # ============================================================
+      # 步骤 7: 推送 cf-host-ip.txt 到 suwei8/blog
+      # ============================================================
+      - name: Push cf-host-ip.txt to blog repo
+        run: |
+          echo "🚀 正在推送 cf-host-ip.txt 到 suwei8/blog..."
+
+          # 克隆博客仓库
+          git clone https://x-access-token:${{ secrets.BLOG_DEPLOY_TOKEN }}@github.com/suwei8/blog.git /tmp/blog
+
+          # 复制结果文件
+          cp cf-host-ip.txt /tmp/blog/cf-host-ip.txt
+
+          # 配置 git 并推送
+          cd /tmp/blog
+          git config user.name "CFST-Bot"
+          git config user.email "cfst-bot@github.com"
+          git add cf-host-ip.txt
+          git diff --cached --quiet && echo "ℹ️ IP 未变化，无需推送" || {
+            git commit -m "🔄 更新最快 Cloudflare IP: ${{ env.FASTEST_IP }} ($(date -u +%Y-%m-%d))"
+            git push
+            echo "✅ 已推送到 suwei8/blog"
+          }
+
+      # ============================================================
+      # 清理
+      # ============================================================
+      - name: Cleanup
+        if: always()
+        run: |
+          echo "🧹 清理中..."
+          # 终止 cloudflared 进程
+          pkill cloudflared || true
+          echo "✅ 清理完成"
