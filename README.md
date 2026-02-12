@@ -16,7 +16,7 @@
 
 | Secret 名称 | 说明 | 示例 |
 |---|---|---|
-| `SSH_HOST` | Cloudflare Tunnel SSH 地址 | `wky-ssh.555606.xyz` |
+| `SSH_HOST` | Cloudflare Tunnel SSH 地址 | `your-host.example.com` |
 | `SSH_USERNAME` | SSH 用户名 | `root` |
 | `SSH_PASSWORD` | SSH 密码 | `your-password` |
 | `SPEEDTEST_URL` | 测速文件 URL | `https://xxx/speedtest.bin` |
